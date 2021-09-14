@@ -50,6 +50,8 @@ ccrb_df.shield_no = ccrb_df.shield_no.astype(int)
 
 # NAME SUBSETTER - intital
 
+
+
 first_input = TextInput(title="Officer Name", value="Dan Panta")
 first_input.value = first_input.value.lower()
 first,last = first_input.value.split(" ")
