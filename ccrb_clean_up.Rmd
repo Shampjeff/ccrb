@@ -1,0 +1,333 @@
+---
+title: "CCRB Clean Up and EDA"
+author: "Jeff Shamp - BxD"
+date: "`r Sys.Date()`"
+output:
+  prettydoc::html_pretty:
+    theme: architect
+    highlight: github
+---
+
+## Raw Data
+
+This is the NYCLU raw `.csv` file from their Github. 
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(fig.width=12, fig.height=8, 
+                      message = FALSE, 
+                      warning = FALSE) 
+
+```
+
+```{r}
+library(tidyverse)
+ccrb_df<- read.csv("https://raw.githubusercontent.com/new-york-civil-liberties-union/NYPD-Misconduct-Complaint-Database/master/CCRB_database_raw.csv")
+```
+
+First let's make a column for the officers full name, and turn the character date into a date time. 
+
+
+```{r}
+ccrb_df<- 
+  ccrb_df %>%
+  distinct() %>%
+  unite(full_name, First.Name:Last.Name, remove=FALSE, sep=" ") %>%
+  mutate(full_name = as_factor(full_name), 
+         Incident.Date = lubridate::mdy(Incident.Date),
+         Allegation = str_to_lower(Allegation), 
+         Allegation = str_replace_all(Allegation, pattern = "-|/", " "),
+         Allegation = str_replace_all(Allegation, pattern = ":", ""))
+```
+
+# FADO Type
+
+Four main types of complaint. 
+
+```{r}
+fado_type<- 
+  ccrb_df %>%
+  select(FADO.Type) %>%
+  group_by(FADO.Type) %>%
+  summarise(count = n())
+
+DT::datatable(fado_type,
+              extensions = c('FixedColumns',"FixedHeader"),
+              options = list(scrollX = TRUE, 
+                         paging=TRUE,
+                         fixedHeader=TRUE))
+```
+
+The NULL FADO type is just a null allegation as well. 
+
+## Offensive language and Discourtesy
+
+Starting here for simplicity sake. 
+
+We need to make some determination as to how we have to reorganize the data regarding FADO type and allegation alingment. I'll, for now, put discourtesies that overlap with offensive language in the offensive language fado type and try to combine various slurs into caategories. 
+
+### Notes on changes
+
+**Race**: Some of the complaints list race specific language, i.e. black, white, hispanic, asian, however some are just listed as race. Combining all the race related complaints together. 
+
+**Ethnicity**: Combining several instances of items relating to ethnicity into "ethnic slur". 
+
+**Religion**: There were only two items that designated religion, the general term and "jewish". These were also combined. 
+
+**Gender**: This is complex field with many items. Generally, items that listed "gender",  "gender identity", or "sexist remark" were combined. Allegations listed as sexual orientation or LGBTQ slurs were combined into "sexual orientation". 
+
+**Gestures and Words**: Profane and rude gestures are combined. "word", "curse", and "tone" were combined into the item "nasty words". 
+
+```{r}
+ccrb_df<- 
+  ccrb_df %>%
+  mutate(
+    Allegation = case_when(
+      str_detect(Allegation, "other asian") ~ "race",
+      str_detect(Allegation, "ethnicity") ~ "ethnic slur",
+      str_detect(Allegation, ".*\\sethnic slur") ~ "ethnic slur",
+      str_detect(Allegation, "black|white") ~ "race",
+      str_detect(Allegation, "hispanic|oriental") ~ "race",
+      str_detect(Allegation, "jewish") ~ "religion",
+      str_detect(Allegation, "gender identity") ~ "gender",
+      str_detect(Allegation, "gay lesbian slur") ~ "sexual orientation",
+      str_detect(Allegation, "curse") ~ "nasty words",
+      str_detect(Allegation, "demeanor tone") ~ "nasty words",
+      str_detect(Allegation, "word") ~ "nasty words",
+      str_detect(Allegation, "other\\sdiscourtesy") ~ "other discourtesy",
+      str_detect(Allegation, "discourtesy") ~ "action",
+      str_detect(Allegation, "profane gesture") ~ "gesture",
+      str_detect(Allegation, "rude gesture") ~ "gesture",
+      str_detect(Allegation, "sexist remark") ~ "gender",
+      TRUE ~ Allegation
+    )
+  ) 
+```
+
+Reassigning FADO type to offensive language for LGBTQ+ and gender related complaints. 
+
+```{r}
+ccrb_df<- 
+  ccrb_df %>%
+  mutate(
+    FADO.Type = case_when(
+      str_detect(Allegation, "sexual orientation") ~ "Offensive Language", 
+      str_detect(Allegation, "gender") ~ "Offensive Language",
+      TRUE ~ FADO.Type
+    )
+  ) 
+
+language_offense<- 
+  ccrb_df %>%
+  filter(FADO.Type %in% c("Offensive Language","Discourtesy")) %>%
+  group_by(FADO.Type, Allegation) %>%
+  summarize(count = n())
+
+DT::datatable(language_offense,
+              extensions = c('FixedColumns',"FixedHeader"),
+              options = list(scrollX = TRUE, 
+                         paging=TRUE,
+                         fixedHeader=TRUE))
+```
+
+## Abuse of Authority
+
+This is a long and complex field. 
+
+Organizing the fields around threats and searches and sexual misconduct. See in line comments
+
+```{r}
+ccrb_df<- 
+  ccrb_df %>%
+  mutate(
+    Allegation = str_remove_all(Allegation, "[[:punct:]]"),
+    Allegation = str_replace_all(Allegation, "\\sre\\s", " to "),
+    Allegation = str_replace_all(Allegation, "vehicle\\ssearched", "vehicle search"),
+    # sex miscon prefix removed
+    Allegation = str_replace_all(Allegation, "sex\\smiscon\\s|sexual\\smisconduct\\s", ""),
+    # gun pointed gun drawn -> gun pointed
+    Allegation = str_replace_all(Allegation, "gun\\spointed\\sgun\\sdrawn", "gun pointed"),
+    Allegation = str_remove_all(Allegation, "and\\sor"),
+    # failure to -> refusal
+    Allegation = str_replace_all(Allegation, "failed", "refusal"),
+    Allegation = str_replace_all(Allegation, "failure", "refusal"),
+    Allegation = str_replace_all(Allegation, "refusal\\s..\\s", "refusal - "), 
+    Allegation = str_replace_all(Allegation, "threat\\s..\\s", "threat - "),
+    # question and stop -> question
+    Allegation = str_replace_all(Allegation, "question.*", "question"),
+    Allegation = str_remove_all(Allegation, "obtain"), 
+    Allegation = str_replace_all(Allegation, "searches", "searched"), 
+    # electronic device to just device
+    Allegation = str_replace_all(Allegation, "electronic\\sdevice", "device"),
+    Allegation = str_remove_all(Allegation, "improper"), 
+    # other abuse to only other
+    Allegation = str_replace_all(Allegation, ".*\\sabuse", "other"), 
+    # organize and format search types
+    Allegation = str_replace_all(Allegation, "searched", "search"),
+    Allegation = str_replace_all(Allegation, "search\\sof", "search"),
+    Allegation = str_replace_all(Allegation, "vehicle search", "search - vehicle"),
+    Allegation = str_replace_all(Allegation, "strip search", "search - strip"),
+    Allegation = str_replace_all(Allegation, "body cavity search", "search - body cavity"),
+    Allegation = str_replace_all(Allegation, "person search", "search - person"),
+    Allegation = str_replace_all(Allegation, "search person", "search - person"),
+    Allegation = str_replace_all(Allegation, "\\bfrisk\\s search", "search - frisk"),
+    Allegation = str_replace_all(Allegation, "search premises", "search - premises"),
+    Allegation = str_replace_all(Allegation, "premise search", "search - premises"),
+    Allegation = str_replace_all(Allegation, "^premises.*", "search - premises"),
+    Allegation = str_replace_all(Allegation, "search recording device", "search - device"),
+    Allegation = str_replace_all(Allegation, "sexually motiv search - strip", "sexually motivated strip search")
+      ) 
+```
+
+
+
+```{r}
+ccrb_df<-
+  ccrb_df %>%
+  mutate(
+    # provide name, shield, or RKT act card -> right to know info
+    Allegation = str_replace_all(Allegation, "provide.*", "right to know info"),
+    Allegation = str_replace_all(Allegation, "threat - force.*", "threat - force"),
+    # orgaanize sexual offenses
+    Allegation = str_replace_all(Allegation, "sexual harassment", "sexually harass -"),
+    Allegation = str_replace_all(Allegation, "^sexual\\s", "sexually harass - "),
+    Allegation = str_replace_all(Allegation, "sexually\\smotivated", "sexually harass - ")
+    ) 
+  
+```
+
+## Force
+
+Trying to combine general types as much as possible while leaving room for contextual understanding. 
+
+**gun pointed**: Changing FADO type for gun pointed from Force FADO to Abuse of Authority. 
+
+```{r}
+ccrb_df<-
+  ccrb_df %>%
+  mutate(
+    FADO.Type = case_when(
+      str_detect(Allegation, "gun pointed") ~ "Abuse of Authority",
+      TRUE ~ FADO.Type
+    ),
+    # clean up "thing as club" items
+    Allegation = str_replace_all(Allegation, "\\sas\\sclub.*", "- blunt force"),
+    Allegation = str_replace_all(Allegation, "\\sbilly\\sclub", "- blunt force"),
+    Allegation = str_replace_all(Allegation, "\\sblunt instrument.*", "- blunt force"), 
+    Allegation = str_remove_all(Allegation, "inanimate"),
+    # other force -> other. We know it's force
+    Allegation = str_replace_all(Allegation, "^other\\s.*", "other"),
+    Allegation = str_replace_all(Allegation, "^physical force", "force"),
+    # this is a hack to fix offensive language, sexual orientation
+    Allegation = str_replace_all(Allegation, "sexually harass - orientation",
+                                 "sexual orientation")
+  )
+```
+
+```{r}
+final_df<- 
+  ccrb_df %>%
+  group_by(FADO.Type, Allegation) %>%
+  summarize(count = n())
+
+```
+
+
+# Board Disposition
+
+Combing all substantiated claims together. The Penalty description will have the results of the claim. 
+
+```{r}
+ccrb_df<-
+  ccrb_df %>%
+  mutate(
+    Board.Disposition = str_to_lower(Board.Disposition),
+    Board.Disposition = str_remove_all(Board.Disposition, "miscellaneous\\s-\\s"),
+    Board.Disposition = str_replace_all(Board.Disposition, "substantiated\\s.*", "substantiated")
+  )
+```
+
+
+# Penalty Description
+
+This is the penalty that was decided. There is some overlap, **which was categorized by the most severe punishment.** That is, suspension plus forfeit of vacation days is listed as suspension only. 
+
+**Termination**: dismissal and termination are combined together. 
+
+```{r}
+ccrb_df<- 
+  ccrb_df %>%
+  mutate(
+    PenaltyDesc = str_to_lower(PenaltyDesc),
+    PenaltyDesc = str_replace_all(PenaltyDesc, "command discipline.*", "command discipline"),
+    PenaltyDesc = str_replace_all(PenaltyDesc, "vacation.*", "forfeit vacation"),
+    PenaltyDesc = str_replace_all(PenaltyDesc, "(forfeit\\s)\\1vacation", "forfeit vacation"),
+    PenaltyDesc = str_replace_all(PenaltyDesc, "formalized training.*", "formalized training"),
+    PenaltyDesc = str_replace_all(PenaltyDesc, "instruction.*", "instruction"),
+    PenaltyDesc = str_replace_all(PenaltyDesc, "no penalty.*", "no penalty"),
+    PenaltyDesc = str_replace_all(PenaltyDesc, "not guilty.*", "not guilty"),
+    PenaltyDesc = str_replace_all(PenaltyDesc, "suspen.*", "suspension"),
+    PenaltyDesc = str_replace_all(PenaltyDesc, "w\\&a.*", "warned \\& admonished"),
+    PenaltyDesc = str_replace_all(PenaltyDesc, "warned and admonished", "warned \\& admonished"),
+    # Terminated and dismissed are equivalent ?
+    PenaltyDesc = str_replace_all(PenaltyDesc, "termination|dismissed", "terminated"),
+    PenaltyDesc = str_replace_all(PenaltyDesc, "dismissal probation.*", "dismissal probation")
+  )
+```
+
+
+# NYPD Disposition
+
+```{r}
+ccrb_df<-
+  ccrb_df %>%
+  mutate(
+    NYPDDisposition = str_to_lower(NYPDDisposition),
+    # apu is dropped because it is likely all from apu
+    NYPDDisposition = str_remove_all(NYPDDisposition,"apu closed:"),
+    NYPDDisposition = str_replace_all(NYPDDisposition, "command discipline.*",
+                                      "command discipline"),
+    NYPDDisposition = str_replace_all(NYPDDisposition, "sol expired.*", 
+                                      "no disciplinary action-sol"),
+    NYPDDisposition = str_replace_all(NYPDDisposition, " no disciplinary action-sol", 
+                                      "no disciplinary action-sol"),
+    NYPDDisposition = str_replace_all(NYPDDisposition, ".*\\sdismissed.*",
+                                      "no disciplinary action-dismissed"),
+    NYPDDisposition = str_remove_all(NYPDDisposition, "apu\\s"),
+    NYPDDisposition = str_remove_all(NYPDDisposition, "^-\\s"),
+    # ngettn-, not sure what that is so dropping it
+    NYPDDisposition = str_replace_all(NYPDDisposition, ".*contendre.*",
+                                      "nolo contendere"),
+    NYPDDisposition = str_remove_all(NYPDDisposition, "plead\\s"),
+    NYPDDisposition = str_remove_all(NYPDDisposition, "negttn-"),
+    NYPDDisposition = str_replace_all(NYPDDisposition, " previously adjudicated, with discipline",
+                                      "previously adjudicated, with discipline"),
+    NYPDDisposition = str_replace_all(NYPDDisposition, " retained, with discipline",
+                                      "retained, with discipline"),
+    # gulty and not guilty have dct, oath variants
+    NYPDDisposition = str_replace_all(NYPDDisposition, "^guilty\\s.*", "guilty"),
+    NYPDDisposition = str_replace_all(NYPDDisposition, "^not guilty\\s.*", "not guilty"),
+  )
+```
+
+
+
+```{r}
+final_df<- 
+  ccrb_df %>%
+  group_by(Board.Disposition, PenaltyDesc,NYPDDisposition) %>%
+  summarise(count = n())
+
+DT::datatable(final_df,
+              extensions = c('FixedColumns',"FixedHeader"),
+              options = list(scrollX = TRUE, 
+                         paging=TRUE,
+                         fixedHeader=TRUE))
+```
+
+
+```{r}
+#write.csv(ccrb_df, file="ccrb_clean")
+```
+
+
+
